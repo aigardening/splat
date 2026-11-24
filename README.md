@@ -11,11 +11,16 @@ pinch to zoom, and the turn eases back in when you let go.
 
 ## Pieces
 
-| Piece | Splats | Size | Source |
+| Piece | Content | Size | Source |
 |---|---|---|---|
-| `pieces/trinity` | 408,635 | 8.4 MB | Polycam capture, 142 photos; one stray clump from the room removed |
+| `pieces/trinity` | 408,635 splats | 8.4 MB | Polycam capture, 142 photos; one stray clump from the room removed |
+| `pieces/trinity_glb` | textured mesh | 2.3 MB (2.7 MB zipped with three.js) | the same capture as a mesh, Draco-compressed, 2048 px textures |
 
-Each piece folder holds the `.spz`, a `config.json` (opening view, spin, background) and `cover.jpg`.
+Each piece folder holds the `.spz` or `.glb`, a `config.json` (opening view, spin, background) and `cover.jpg`.
+
+`glb.html` shows a GLB with the same camera, spin and controls, so a mesh and a splat of the same
+object can be compared like for like. It uses three.js 0.178.0 (MIT), bundled in `vendor/three` and
+copied into the piece at build time; any animation baked into the GLB is ignored.
 
 ## Build and test
 
@@ -23,6 +28,7 @@ Each piece folder holds the `.spz`, a `config.json` (opening view, spin, backgro
 python3 tools/build.py pieces/trinity          # dist/trinity/ and dist/trinity.zip (the file to mint)
 python3 tools/serve_objkt.py                   # serves dist/ under objkt's Content-Security-Policy
 open "http://127.0.0.1:8801/?piece=trinity"    # the piece in a sandboxed iframe, as on objkt
+open "http://127.0.0.1:8801/compare?a=trinity&b=trinity_glb"   # splat and mesh side by side
 python3 tools/shoot.py trinity shot.png 1200 1 --still    # headless render; --still holds the opening view
 ```
 

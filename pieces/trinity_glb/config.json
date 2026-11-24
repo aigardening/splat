@@ -1,0 +1,19 @@
+{
+  "title": "Trinity (mesh)",
+  "viewer": "glb",
+  "file": "Trinity_turntable_web.glb",
+  "target": null,
+  "distance": 3.6,
+  "elevation": 30,
+  "azimuth": 220,
+  "period": 31,
+  "fov": 40,
+  "minDistance": 0.4,
+  "maxDistance": 6,
+  "minElevation": -85,
+  "maxElevation": 85,
+  "background": [0, 0, 0],
+  "exposure": 1.0,
+  "idleResume": 0.1,
+  "spinRamp": 5
+}
