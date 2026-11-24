@@ -28,8 +28,9 @@ const CONFIG = {
   period: 31,              // seconds per turn; positive turns the piece clockwise seen from above
   fov: 40,                 // vertical, degrees
   minDistance: 0.4, maxDistance: 8,
+  minElevation: -85, maxElevation: 85,   // degrees; beyond +-85 the orbit flips over the pole
   background: [0, 0, 0],
-  idleResume: 0.25,        // seconds without input before the spin starts again
+  idleResume: 0.1,         // seconds without input before the spin starts again
   spinRamp: 5              // seconds for the spin to ease back up to full speed
 };
 /*END CONFIG*/
@@ -273,7 +274,7 @@ const STILL = new URLSearchParams(location.search).has('still');   // ?still hol
   canvas.addEventListener('pointermove', e => {
     if (!ptrs.has(e.pointerId)) return;
     const [x0, y0] = ptrs.get(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]); lastInput = performance.now();
-    if (ptrs.size === 1) { az -= (e.clientX - x0) * 0.3; el = Math.max(-10, Math.min(85, el + (e.clientY - y0) * 0.3)); }
+    if (ptrs.size === 1) { az -= (e.clientX - x0) * 0.3; el = Math.max(CONFIG.minElevation, Math.min(CONFIG.maxElevation, el + (e.clientY - y0) * 0.3)); }
     else if (ptrs.size === 2) {
       const [a, b] = [...ptrs.values()], dd = Math.hypot(a[0] - b[0], a[1] - b[1]);
       if (pinch0) dist = Math.max(CONFIG.minDistance, Math.min(CONFIG.maxDistance, dist * pinch0 / dd));
