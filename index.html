@@ -29,7 +29,8 @@ const CONFIG = {
   fov: 40,                 // vertical, degrees
   minDistance: 0.4, maxDistance: 8,
   background: [0, 0, 0],
-  idleResume: 4            // seconds without input before the spin resumes
+  idleResume: 1.5,         // seconds without input before the spin starts again
+  spinRamp: 5              // seconds for the spin to ease back up to full speed
 };
 /*END CONFIG*/
 
@@ -286,7 +287,10 @@ const STILL = new URLSearchParams(location.search).has('still');   // ?still hol
   let prev = performance.now();
   function frame(now) {
     const dt = Math.min(0.1, (now - prev) / 1000); prev = now;
-    if (now - lastInput > CONFIG.idleResume * 1000 && ptrs.size === 0 && CONFIG.period && !STILL) az += 360 / CONFIG.period * dt;
+    // spin: stops at a touch, eases back in (smoothstep) once the viewer lets go
+    const idle = ptrs.size === 0 ? (now - lastInput) / 1000 - CONFIG.idleResume : -1;
+    const ramp = idle <= 0 ? 0 : Math.min(1, idle / Math.max(CONFIG.spinRamp || 0, 1e-3));
+    if (CONFIG.period && !STILL) az += 360 / CONFIG.period * dt * ramp * ramp * (3 - 2 * ramp);
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }

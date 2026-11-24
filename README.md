@@ -7,7 +7,7 @@ A small, self-contained Gaussian splat viewer for minting splats as interactive 
 to it. It reads Niantic [SPZ](https://github.com/nianticlabs/spz) files (versions 2 and 3, gzip),
 sorts the splats back to front in a blob worker, and evaluates view-dependent colour (spherical
 harmonics up to degree 3). The piece opens on a set view and turns slowly; drag to orbit, scroll or
-pinch to zoom, and the turn resumes after a few seconds without input.
+pinch to zoom, and the turn eases back in when you let go.
 
 ## Pieces
 

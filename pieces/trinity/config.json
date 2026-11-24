@@ -11,5 +11,6 @@
   "minDistance": 0.4,
   "maxDistance": 6,
   "background": [0, 0, 0],
-  "idleResume": 4
+  "idleResume": 1.5,
+  "spinRamp": 5
 }
