@@ -16,6 +16,7 @@ FRAME = b"""<!doctype html><meta charset=utf-8><title>objkt sandbox test</title>
 <script>const p=new URLSearchParams(location.search).get('piece')||'trinity';document.getElementById('f').src='http://127.0.0.1:8800/'+p+'/?creator=tz1test&viewer=tz1test'</script>"""
 COMPARE = b"""<!doctype html><meta charset=utf-8><title>compare</title>
 <style>html,body{margin:0;height:100%;background:#1e1f22;display:flex;gap:8px;padding:8px;box-sizing:border-box}iframe{border:0;flex:1;height:100%}</style>
+<body></body>
 <script>const q=new URLSearchParams(location.search);for(const k of ['a','b']){const f=document.createElement('iframe');f.sandbox='allow-scripts allow-same-origin allow-pointer-lock';f.src='http://127.0.0.1:8800/'+(q.get(k)||(k=='a'?'trinity':'trinity_glb'))+'/?creator=tz1test&viewer=tz1test';document.body.appendChild(f)}</script>"""
 class Frame(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
