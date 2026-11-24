@@ -1,0 +1,15 @@
+{
+  "title": "Trinity",
+  "file": "Trinity_splat.spz",
+  "flipY": true,
+  "target": [-0.05, 0.2, 0.15],
+  "distance": 3.6,
+  "elevation": 30,
+  "azimuth": 180,
+  "period": 31,
+  "fov": 40,
+  "minDistance": 0.4,
+  "maxDistance": 6,
+  "background": [0, 0, 0],
+  "idleResume": 4
+}

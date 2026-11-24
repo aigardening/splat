@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>splat</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// Self-contained Gaussian splat viewer: WebGL2, no libraries, no network access beyond the
+// .spz file next to this page. Reads Niantic SPZ (versions 2 and 3, gzip), sorts splats
+// back to front in a blob worker, evaluates spherical harmonics up to degree 3 per vertex.
+
+/*CONFIG*/
+const CONFIG = {
+  file: 'scene.spz',
+  flipY: true,             // file stored Y-down (Polycam): rotate 180 deg about X
+  target: [0, 0, 0],       // orbit centre, in the flipped frame
+  distance: 2.0,
+  elevation: 30,           // degrees above the horizon at start
+  azimuth: 0,              // degrees at start
+  period: 31,              // seconds per turn; positive turns the piece clockwise seen from above
+  fov: 40,                 // vertical, degrees
+  minDistance: 0.4, maxDistance: 8,
+  background: [0, 0, 0],
+  idleResume: 4            // seconds without input before the spin resumes
+};
+/*END CONFIG*/
+
+// BEGIN decode
+async function gunzip(buf) {
+  const ds = new DecompressionStream('gzip');
+  const stream = new Blob([buf]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+// Returns flat arrays: pos (n*3), cov (n*6: xx xy xz yy yz zz), rgba (n*4 bytes), sh (n*48 bytes, coefficient-major, rgb interleaved), shDegree.
+function decodeSpz(b, flipY) {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  if (dv.getUint32(0, true) !== 0x5053474e) throw new Error('not an SPZ file');
+  const version = dv.getUint32(4, true), n = dv.getUint32(8, true);
+  const shDegree = b[12], frac = b[13];
+  if (version < 2 || version > 3) throw new Error('SPZ version ' + version + ' not supported');
+  const shDim = [0, 3, 8, 15][shDegree];
+  let o = 16;
+  const P = o; o += n * 9;
+  const A = o; o += n;
+  const C = o; o += n * 3;
+  const S = o; o += n * 3;
+  const R = o; o += n * (version >= 3 ? 4 : 3);
+  const H = o; o += n * shDim * 3;
+  if (o > b.length) throw new Error('SPZ truncated');
+  const pos = new Float32Array(n * 3), cov = new Float32Array(n * 6);
+  const rgba = new Uint8Array(n * 4), sh = new Uint8Array(n * 48).fill(128);
+  const fs = 1 / (1 << frac), sy = flipY ? -1 : 1;
+  const C0 = 0.28209479177387814, SQ = Math.SQRT1_2, MASK = 511;
+  const q = [0, 0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    for (let k = 0; k < 3; k++) {
+      const p = P + i * 9 + k * 3;
+      let v = b[p] | (b[p + 1] << 8) | (b[p + 2] << 16);
+      if (v & 0x800000) v |= 0xff000000;
+      pos[i * 3 + k] = v * fs * (k === 0 ? 1 : sy);
+    }
+    const sx = Math.exp(b[S + i * 3] / 16 - 10), syy = Math.exp(b[S + i * 3 + 1] / 16 - 10), sz = Math.exp(b[S + i * 3 + 2] / 16 - 10);
+    // quaternion, stored x y z w
+    if (version >= 3) {
+      let comp = (b[R + i * 4] | (b[R + i * 4 + 1] << 8) | (b[R + i * 4 + 2] << 16) | (b[R + i * 4 + 3] << 24)) >>> 0;
+      const largest = comp >>> 30; let ss = 0;
+      for (let k = 3; k >= 0; k--) {
+        if (k === largest) continue;
+        const mag = comp & MASK, neg = (comp >>> 9) & 1; comp >>>= 10;
+        q[k] = SQ * mag / MASK * (neg ? -1 : 1); ss += q[k] * q[k];
+      }
+      q[largest] = Math.sqrt(Math.max(0, 1 - ss));
+    } else {
+      for (let k = 0; k < 3; k++) q[k] = b[R + i * 3 + k] / 127.5 - 1;
+      q[3] = Math.sqrt(Math.max(0, 1 - q[0] * q[0] - q[1] * q[1] - q[2] * q[2]));
+    }
+    const x = q[0], y = q[1], z = q[2], w = q[3];
+    const r00 = 1 - 2 * (y * y + z * z), r01 = 2 * (x * y - w * z), r02 = 2 * (x * z + w * y);
+    const r10 = 2 * (x * y + w * z), r11 = 1 - 2 * (x * x + z * z), r12 = 2 * (y * z - w * x);
+    const r20 = 2 * (x * z - w * y), r21 = 2 * (y * z + w * x), r22 = 1 - 2 * (x * x + y * y);
+    const m00 = r00 * sx, m01 = r01 * syy, m02 = r02 * sz;
+    const m10 = r10 * sx, m11 = r11 * syy, m12 = r12 * sz;
+    const m20 = r20 * sx, m21 = r21 * syy, m22 = r22 * sz;
+    const c = i * 6;
+    cov[c] = m00 * m00 + m01 * m01 + m02 * m02;
+    cov[c + 1] = (m00 * m10 + m01 * m11 + m02 * m12) * sy;
+    cov[c + 2] = (m00 * m20 + m01 * m21 + m02 * m22) * sy;
+    cov[c + 3] = m10 * m10 + m11 * m11 + m12 * m12;
+    cov[c + 4] = m10 * m20 + m11 * m21 + m12 * m22;
+    cov[c + 5] = m20 * m20 + m21 * m21 + m22 * m22;
+    for (let k = 0; k < 3; k++) {
+      const dc = (b[C + i * 3 + k] / 255 - 0.5) / 0.15;
+      rgba[i * 4 + k] = Math.max(0, Math.min(255, Math.round((0.5 + C0 * dc) * 255)));
+    }
+    rgba[i * 4 + 3] = b[A + i];
+    sh.set(b.subarray(H + i * shDim * 3, H + (i + 1) * shDim * 3), i * 48);
+  }
+  return { n, pos, cov, rgba, sh, shDegree };
+}
+// END decode
+
+function sortWorker() {
+  let pos, n, keys, counts = new Uint32Array(65536), starts = new Uint32Array(65536);
+  onmessage = (e) => {
+    if (e.data.pos) { pos = e.data.pos; n = pos.length / 3; keys = new Uint16Array(n); return; }
+    const [fx, fy, fz, cx, cy, cz] = e.data.view;
+    let lo = Infinity, hi = -Infinity;
+    const d = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const v = (pos[3 * i] - cx) * fx + (pos[3 * i + 1] - cy) * fy + (pos[3 * i + 2] - cz) * fz;
+      d[i] = v; if (v < lo) lo = v; if (v > hi) hi = v;
+    }
+    const sc = 65535 / Math.max(hi - lo, 1e-9);
+    counts.fill(0);
+    for (let i = 0; i < n; i++) { const k = ((hi - d[i]) * sc) | 0; keys[i] = k; counts[k]++; }   // far first
+    starts[0] = 0; for (let k = 1; k < 65536; k++) starts[k] = starts[k - 1] + counts[k - 1];
+    const idx = new Uint32Array(n);
+    for (let i = 0; i < n; i++) idx[starts[keys[i]]++] = i;
+    postMessage({ idx }, [idx.buffer]);
+  };
+}
+
+const VS = `#version 300 es
+precision highp float; precision highp int;
+uniform highp usampler2D u_data;
+uniform vec3 u_r, u_d, u_f, u_cam;
+uniform vec2 u_size; uniform float u_focal, u_fade; uniform int u_shDeg;
+in vec2 a_corner; in uint a_index;
+out vec4 v_col; out vec2 v_q;
+const int PER_ROW = 682;
+float shb(uvec4 t, int k) { return float((t[k >> 2] >> (8u * uint(k & 3))) & 255u) / 128.0 - 1.0; }
+void main() {
+  int i = int(a_index);
+  ivec2 base = ivec2((i % PER_ROW) * 6, i / PER_ROW);
+  uvec4 t0 = texelFetch(u_data, base, 0);
+  vec3 p = uintBitsToFloat(t0.xyz);
+  vec3 rel = p - u_cam;
+  float tx = dot(u_r, rel), ty = dot(u_d, rel), tz = dot(u_f, rel);
+  gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+  if (tz < 0.02) return;
+  float u = u_focal * tx / tz + 0.5 * u_size.x, v = u_focal * ty / tz + 0.5 * u_size.y;
+  if (abs(u - 0.5 * u_size.x) > 1.3 * u_size.x || abs(v - 0.5 * u_size.y) > 1.3 * u_size.y) return;
+  vec4 c1 = uintBitsToFloat(texelFetch(u_data, base + ivec2(1, 0), 0));
+  vec2 c2 = uintBitsToFloat(texelFetch(u_data, base + ivec2(2, 0), 0).xy);
+  mat3 S = mat3(c1.x, c1.y, c1.z, c1.y, c1.w, c2.x, c1.z, c2.x, c2.y);
+  vec3 T0 = (u_focal / tz) * u_r - (u_focal * tx / (tz * tz)) * u_f;
+  vec3 T1 = (u_focal / tz) * u_d - (u_focal * ty / (tz * tz)) * u_f;
+  float a = dot(T0, S * T0) + 0.3, b = dot(T0, S * T1), c = dot(T1, S * T1) + 0.3;
+  float mid = 0.5 * (a + c), rad = sqrt(max(0.25 * (a - c) * (a - c) + b * b, 0.0));
+  float l1 = mid + rad, l2 = max(mid - rad, 0.1);
+  vec2 e1 = abs(b) < 1e-12 ? (a >= c ? vec2(1.0, 0.0) : vec2(0.0, 1.0)) : normalize(vec2(b, l1 - a));
+  vec2 e2 = vec2(-e1.y, e1.x);
+  vec2 off = a_corner.x * min(3.0 * sqrt(l1), 1024.0) * e1 + a_corner.y * min(3.0 * sqrt(l2), 1024.0) * e2;
+  vec2 px = vec2(u, v) + off;
+  gl_Position = vec4(px.x / u_size.x * 2.0 - 1.0, 1.0 - px.y / u_size.y * 2.0, 0.0, 1.0);
+  v_q = a_corner * 3.0;
+  uint rgba = t0.w;
+  vec3 col = vec3(float(rgba & 255u), float((rgba >> 8) & 255u), float((rgba >> 16) & 255u)) / 255.0;
+  float alpha = float(rgba >> 24) / 255.0;
+  if (u_shDeg > 0) {
+    uvec4 h0 = texelFetch(u_data, base + ivec2(3, 0), 0), h1 = texelFetch(u_data, base + ivec2(4, 0), 0), h2 = texelFetch(u_data, base + ivec2(5, 0), 0);
+    vec3 dir = normalize(rel);
+    if (${'${FLIP}'} == 1) dir.yz = -dir.yz;            // back to the file's frame for the SH basis
+    float x = dir.x, y = dir.y, z = dir.z;
+    float xx = x * x, yy = y * y, zz = z * z, xy = x * y, yz = y * z, xz = x * z;
+    float B[15];
+    B[0] = -0.4886025119029199 * y; B[1] = 0.4886025119029199 * z; B[2] = -0.4886025119029199 * x;
+    B[3] = 1.0925484305920792 * xy; B[4] = -1.0925484305920792 * yz; B[5] = 0.31539156525252005 * (2.0 * zz - xx - yy);
+    B[6] = -1.0925484305920792 * xz; B[7] = 0.5462742152960396 * (xx - yy);
+    B[8] = -0.5900435899266435 * y * (3.0 * xx - yy); B[9] = 2.890611442640554 * xy * z; B[10] = -0.4570457994644658 * y * (4.0 * zz - xx - yy);
+    B[11] = 0.3731763325901154 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy); B[12] = -0.4570457994644658 * x * (4.0 * zz - xx - yy);
+    B[13] = 1.445305721320277 * z * (xx - yy); B[14] = -0.5900435899266435 * x * (xx - 3.0 * yy);
+    int dim = u_shDeg == 1 ? 3 : (u_shDeg == 2 ? 8 : 15);
+    for (int k = 0; k < 15; k++) {
+      if (k >= dim) break;
+      int j = k * 3;
+      vec3 s;
+      for (int ch = 0; ch < 3; ch++) {
+        int bi = j + ch; uvec4 t = bi < 16 ? h0 : (bi < 32 ? h1 : h2);
+        s[ch] = shb(t, bi & 15);
+      }
+      col += B[k] * s;
+    }
+  }
+  v_col = vec4(clamp(col, 0.0, 1.0), min(alpha, 0.99) * u_fade);
+}`;
+
+const FS = `#version 300 es
+precision highp float;
+in vec4 v_col; in vec2 v_q; out vec4 o;
+void main() {
+  float a = v_col.a * exp(-0.5 * dot(v_q, v_q));
+  if (a < 1.0 / 255.0) discard;
+  o = vec4(v_col.rgb * a, a);
+}`;
+
+const STILL = new URLSearchParams(location.search).has('still');   // ?still holds the opening view (used to render the cover)
+
+(async function main() {
+  const canvas = document.getElementById('c');
+  const gl = canvas.getContext('webgl2', { antialias: false, premultipliedAlpha: true, preserveDrawingBuffer: true });
+  if (!gl) { document.body.style.background = '#222'; return; }
+  const bg = CONFIG.background;
+  document.body.style.background = `rgb(${bg.map(v => Math.round(v * 255)).join(',')})`;
+
+  const raw = new Uint8Array(await (await fetch(CONFIG.file)).arrayBuffer());
+  const g = decodeSpz(raw[0] === 0x1f && raw[1] === 0x8b ? await gunzip(raw) : raw, CONFIG.flipY);
+
+  // pack 6 RGBA32UI texels per splat: pos+rgba, cov(4), cov(2)+pad, sh(48 bytes)
+  const PER_ROW = 682, W = PER_ROW * 6, H = Math.ceil(g.n / PER_ROW);
+  const tex = new Uint32Array(W * H * 4), f32 = new Float32Array(tex.buffer);
+  const rgba32 = new Uint32Array(g.rgba.buffer), sh32 = new Uint32Array(g.sh.buffer);
+  for (let i = 0; i < g.n; i++) {
+    const o = ((i / PER_ROW | 0) * W + (i % PER_ROW) * 6) * 4;
+    f32[o] = g.pos[3 * i]; f32[o + 1] = g.pos[3 * i + 1]; f32[o + 2] = g.pos[3 * i + 2]; tex[o + 3] = rgba32[i];
+    for (let k = 0; k < 6; k++) f32[o + 4 + k] = g.cov[6 * i + k];
+    for (let k = 0; k < 12; k++) tex[o + 12 + k] = sh32[12 * i + k];
+  }
+  const vs = VS.replaceAll('${FLIP}', CONFIG.flipY ? '1' : '0');
+  const prog = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, FS]]) {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    gl.attachShader(prog, s);
+  }
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32UI, W, H, 0, gl.RGBA_INTEGER, gl.UNSIGNED_INT, tex);
+  const U = n => gl.getUniformLocation(prog, n);
+  gl.uniform1i(U('u_data'), 0); gl.uniform1i(U('u_shDeg'), g.shDegree);
+
+  const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+  const qb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, qb);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  const ac = gl.getAttribLocation(prog, 'a_corner'); gl.enableVertexAttribArray(ac); gl.vertexAttribPointer(ac, 2, gl.FLOAT, false, 0, 0);
+  const ib = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, ib);
+  const ai = gl.getAttribLocation(prog, 'a_index'); gl.enableVertexAttribArray(ai); gl.vertexAttribIPointer(ai, 1, gl.UNSIGNED_INT, 0, 0); gl.vertexAttribDivisor(ai, 1);
+  gl.disable(gl.DEPTH_TEST); gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+  const worker = new Worker(URL.createObjectURL(new Blob(['(' + sortWorker.toString() + ')()'], { type: 'text/javascript' })));
+  worker.postMessage({ pos: g.pos });
+  let count = 0, sorting = false, lastSorted = null;
+  worker.onmessage = (e) => { gl.bindBuffer(gl.ARRAY_BUFFER, ib); gl.bufferData(gl.ARRAY_BUFFER, e.data.idx, gl.DYNAMIC_DRAW); count = e.data.idx.length; sorting = false; };
+
+  // camera
+  let az = CONFIG.azimuth, el = CONFIG.elevation, dist = CONFIG.distance, lastInput = -1e9, fadeStart = null;
+  const tgt = CONFIG.target, rad = Math.PI / 180;
+  function camera() {
+    const ca = Math.cos(el * rad);
+    const cam = [tgt[0] + dist * ca * Math.sin(az * rad), tgt[1] + dist * Math.sin(el * rad), tgt[2] + dist * ca * Math.cos(az * rad)];
+    const f = [tgt[0] - cam[0], tgt[1] - cam[1], tgt[2] - cam[2]], fl = Math.hypot(...f); f.forEach((v, k) => f[k] = v / fl);
+    let r = [-f[2], 0, f[0]]; const rl = Math.hypot(...r); r = r.map(v => v / rl);            // f x up(0,1,0)
+    const d = [f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]];   // f x r: screen down
+    return { cam, f, r, d };
+  }
+
+  // input: drag to orbit, wheel or pinch to zoom
+  const ptrs = new Map(); let pinch0 = null;
+  canvas.addEventListener('pointerdown', e => { canvas.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]); lastInput = performance.now(); });
+  canvas.addEventListener('pointermove', e => {
+    if (!ptrs.has(e.pointerId)) return;
+    const [x0, y0] = ptrs.get(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]); lastInput = performance.now();
+    if (ptrs.size === 1) { az -= (e.clientX - x0) * 0.3; el = Math.max(-10, Math.min(85, el + (e.clientY - y0) * 0.3)); }
+    else if (ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()], dd = Math.hypot(a[0] - b[0], a[1] - b[1]);
+      if (pinch0) dist = Math.max(CONFIG.minDistance, Math.min(CONFIG.maxDistance, dist * pinch0 / dd));
+      pinch0 = dd;
+    }
+  });
+  const up = e => { ptrs.delete(e.pointerId); pinch0 = null; };
+  canvas.addEventListener('pointerup', up); canvas.addEventListener('pointercancel', up);
+  canvas.addEventListener('wheel', e => { e.preventDefault(); lastInput = performance.now(); dist = Math.max(CONFIG.minDistance, Math.min(CONFIG.maxDistance, dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+
+  let prev = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.1, (now - prev) / 1000); prev = now;
+    if (now - lastInput > CONFIG.idleResume * 1000 && ptrs.size === 0 && CONFIG.period && !STILL) az += 360 / CONFIG.period * dt;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    const c = camera();
+    const key = [...c.f, ...c.cam];
+    if (!sorting && (!lastSorted || key.some((v, k) => Math.abs(v - lastSorted[k]) > 1e-4))) { sorting = true; lastSorted = key; worker.postMessage({ view: key }); }
+    gl.viewport(0, 0, w, h); gl.clearColor(bg[0], bg[1], bg[2], 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    if (count) {
+      if (fadeStart === null) fadeStart = now;
+      gl.uniform3fv(U('u_r'), c.r); gl.uniform3fv(U('u_d'), c.d); gl.uniform3fv(U('u_f'), c.f); gl.uniform3fv(U('u_cam'), c.cam);
+      gl.uniform2f(U('u_size'), w, h); gl.uniform1f(U('u_focal'), 0.5 * h / Math.tan(CONFIG.fov * rad / 2));
+      const fade = Math.min(1, (now - fadeStart) / 1500);
+      gl.uniform1f(U('u_fade'), fade);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+      if (fade === 1) document.body.dataset.ready = '1';
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})().catch(err => { console.error(err); document.body.dataset.error = String(err); });
+</script>
+</body>
+</html>
